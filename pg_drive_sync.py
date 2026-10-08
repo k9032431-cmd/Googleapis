@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, urlparse, quote
 
 import requests
 from dotenv import load_dotenv
@@ -139,7 +139,8 @@ class PanelClient:
         while True:
             resp = self.session.get(
                 f"{self.cfg.panel_base_url}/api/users",
-                params={"offset": offset, "limit": limit},
+                # load_sub=true заставляет панель заполнить subscription_url.
+                params={"offset": offset, "limit": limit, "load_sub": "true"},
                 timeout=30,
             )
             resp.raise_for_status()
@@ -157,9 +158,13 @@ class PanelClient:
         sub_url = user.get("subscription_url") or ""
         if not sub_url:
             raise ValueError("у пользователя нет subscription_url")
-        # subscription_url обычно относительный (/sub/<token>) — приклеиваем к base.
-        full = sub_url if sub_url.startswith("http") else urljoin(
-            self.cfg.panel_base_url + "/", sub_url.lstrip("/"))
+        # Берём только путь (+query) и всегда стучимся к панели по localhost —
+        # публичный домен из ссылки может быть заблокирован, а контент одинаков.
+        parsed = urlparse(sub_url)
+        path = parsed.path if parsed.scheme else sub_url
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        full = urljoin(self.cfg.panel_base_url + "/", path.lstrip("/"))
         if self.cfg.sub_client_type:
             full = full.rstrip("/") + "/" + self.cfg.sub_client_type
         resp = self.session.get(
