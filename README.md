@@ -47,22 +47,41 @@ PasarGuard (localhost)  ──►  pg_drive_sync  ──►  Google Drive  ─�
 
 ## Подготовка Google (один раз)
 
+Рекомендуемый режим записи — **OAuth** (от имени личного аккаунта). Он работает
+на обычном бесплатном Gmail. Сервис-аккаунт на бесплатном аккаунте не годится:
+у него нет места на диске, и заливка падает с `storageQuotaExceeded` (ему нужен
+платный Workspace с Shared Drive).
+
 1. **Проект и Drive API.** [Google Cloud Console](https://console.cloud.google.com)
    → создай проект → **APIs & Services → Library** → включи **Google Drive API**.
 
 2. **API-ключ (чтение).** APIs & Services → **Credentials → Create credentials →
-   API key**. Это `GOOGLE_API_KEY` — он подставляется в ссылку для клиента.
+   API key**. Это `GOOGLE_API_KEY` — подставляется в ссылку для клиента.
 
-3. **Service account (запись).** Credentials → **Create credentials → Service
-   account** → у созданного аккаунта вкладка **Keys → Add key → JSON** → скачай
-   JSON. Запомни его email вида `xxx@xxx.iam.gserviceaccount.com`.
+3. **OAuth consent screen.** APIs & Services → **OAuth consent screen** →
+   тип **External** → заполни имя/почту → сохрани. На экране **Audience**
+   нажми **Publish app** (статус *In production*) — иначе refresh-токен протухнет
+   через 7 дней. Предупреждение «unverified app» для личного использования можно
+   игнорировать.
 
-4. **Папка для файлов.** Сервис-аккаунт не имеет своего места на диске, поэтому:
-   - **Рекомендуется:** создай **Shared Drive**, добавь email сервис-аккаунта
-     как *Content manager*, возьми его ID.
-   - **Или:** создай папку в своём Google Drive, «Поделиться» → добавь email
-     сервис-аккаунта как *Редактор*, скопируй ID папки из URL
-     (`drive.google.com/drive/folders/`**`ЭТОТ_ID`**). Это `DRIVE_FOLDER_ID`.
+4. **OAuth client (запись).** Credentials → **Create credentials → OAuth client
+   ID** → тип **Web application** → в **Authorized redirect URIs** добавь:
+   `https://developers.google.com/oauthplayground` → **Create**. Скопируй
+   **Client ID** и **Client secret**.
+
+5. **Refresh token** — через [OAuth Playground](https://developers.google.com/oauthplayground):
+   - справа вверху ⚙️ → **Use your own OAuth credentials** → вставь Client ID и
+     Client secret;
+   - слева в поле ввода впиши scope `https://www.googleapis.com/auth/drive` →
+     **Authorize APIs** → войди своим Google-аккаунтом, разреши доступ;
+   - нажми **Exchange authorization code for tokens** → скопируй **Refresh token**.
+   Это `GOOGLE_OAUTH_REFRESH_TOKEN` (а Client ID/secret из п.4 —
+   `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`).
+
+6. **Папка для файлов.** Создай папку в своём Google Drive, зайди в неё и
+   скопируй ID из адреса
+   (`drive.google.com/drive/folders/`**`ЭТОТ_ID`**). Это `DRIVE_FOLDER_ID`.
+   (Расшаривать никому не нужно — файлы и так твои.)
 
 ---
 
@@ -84,14 +103,13 @@ sudo bash install.sh
 `.env` и systemd-сервис `pasarguard-drive-sync`. Затем:
 
 ```bash
-# 1) положи JSON сервис-аккаунта
-sudo cp service_account.json /opt/googleapis-bot/service_account.json
-sudo chown pgdrive:pgdrive /opt/googleapis-bot/service_account.json
+# 1) заполни настройки
+sudo nano /opt/googleapis-bot/.env
+#   PANEL_ADMIN_USERNAME / PANEL_ADMIN_PASSWORD
+#   GOOGLE_API_KEY, DRIVE_FOLDER_ID
+#   GOOGLE_OAUTH_CLIENT_ID / _SECRET / _REFRESH_TOKEN   (режим oauth)
 
-# 2) заполни настройки
-sudo nano /opt/googleapis-bot/.env      # PANEL_ADMIN_*, GOOGLE_API_KEY, DRIVE_FOLDER_ID
-
-# 3) запусти
+# 2) запусти
 sudo systemctl start pasarguard-drive-sync
 ```
 

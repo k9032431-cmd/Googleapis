@@ -31,6 +31,7 @@ import requests
 from dotenv import load_dotenv
 
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
@@ -74,12 +75,24 @@ class Config:
         self.target_users = [u.strip() for u in raw_users.split(",") if u.strip()]
         self.only_active = _get_bool("ONLY_ACTIVE_USERS", True)
 
-        # Google Drive
-        self.sa_file = (os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "").strip()
+        # Google Drive — чтение (клиент по API-ключу)
         self.google_api_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
         self.drive_folder_id = (os.getenv("DRIVE_FOLDER_ID") or "").strip()
         self.file_name_template = (os.getenv("FILE_NAME_TEMPLATE")
                                    or "{username}.txt").strip()
+
+        # Google Drive — запись. Два режима:
+        #   oauth           — от имени личного аккаунта (работает на бесплатном Gmail)
+        #   service_account — через сервис-аккаунт (нужен Shared Drive / Workspace)
+        self.sa_file = (os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "").strip()
+        self.oauth_client_id = (os.getenv("GOOGLE_OAUTH_CLIENT_ID") or "").strip()
+        self.oauth_client_secret = (os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or "").strip()
+        self.oauth_refresh_token = (os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN") or "").strip()
+
+        mode = (os.getenv("DRIVE_AUTH_MODE") or "").strip().lower()
+        if not mode:
+            mode = "oauth" if self.oauth_refresh_token else "service_account"
+        self.auth_mode = mode
 
         # состояние и вывод
         state_dir = os.getenv("STATE_DIR") or "/var/lib/pasarguard-drive-sync"
@@ -95,15 +108,38 @@ class Config:
             errors.append("PANEL_ADMIN_USERNAME не задан.")
         if not self.panel_admin_password:
             errors.append("PANEL_ADMIN_PASSWORD не задан.")
-        if not self.sa_file:
-            errors.append("GOOGLE_SERVICE_ACCOUNT_FILE не задан.")
-        elif not Path(self.sa_file).is_file():
-            errors.append(f"Файл service account не найден: {self.sa_file}")
+        if self.auth_mode == "oauth":
+            if not self.oauth_client_id:
+                errors.append("GOOGLE_OAUTH_CLIENT_ID не задан.")
+            if not self.oauth_client_secret:
+                errors.append("GOOGLE_OAUTH_CLIENT_SECRET не задан.")
+            if not self.oauth_refresh_token:
+                errors.append("GOOGLE_OAUTH_REFRESH_TOKEN не задан.")
+        elif self.auth_mode == "service_account":
+            if not self.sa_file:
+                errors.append("GOOGLE_SERVICE_ACCOUNT_FILE не задан.")
+            elif not Path(self.sa_file).is_file():
+                errors.append(f"Файл service account не найден: {self.sa_file}")
+        else:
+            errors.append(f"Неизвестный DRIVE_AUTH_MODE: {self.auth_mode}")
         if not self.google_api_key:
             errors.append("GOOGLE_API_KEY не задан (нужен для ссылки чтения).")
         if not self.drive_folder_id:
-            errors.append("DRIVE_FOLDER_ID не задан (папка/Shared Drive для файлов).")
+            errors.append("DRIVE_FOLDER_ID не задан (папка для файлов).")
         return errors
+
+    def build_drive_credentials(self):
+        if self.auth_mode == "oauth":
+            return UserCredentials(
+                None,
+                refresh_token=self.oauth_refresh_token,
+                client_id=self.oauth_client_id,
+                client_secret=self.oauth_client_secret,
+                token_uri="https://oauth2.googleapis.com/token",
+                scopes=DRIVE_SCOPES,
+            )
+        return service_account.Credentials.from_service_account_file(
+            self.sa_file, scopes=DRIVE_SCOPES)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,8 +218,7 @@ class PanelClient:
 class DriveClient:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        creds = service_account.Credentials.from_service_account_file(
-            cfg.sa_file, scopes=DRIVE_SCOPES)
+        creds = cfg.build_drive_credentials()
         self.service = build("drive", "v3", credentials=creds,
                              cache_discovery=False)
 
@@ -311,6 +346,7 @@ def main() -> None:
         logger.error("Исправь .env и перезапусти.")
         sys.exit(1)
 
+    logger.info("Режим авторизации Drive: %s", cfg.auth_mode)
     drive = DriveClient(cfg)
 
     if cfg.sync_interval > 0:

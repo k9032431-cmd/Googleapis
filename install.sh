@@ -115,10 +115,12 @@ systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
 echo
 if [ "$NEED_CONFIG" -eq 1 ]; then
     warn "Почти готово! Заполни настройки:"
-    echo "    1) Положи JSON сервис-аккаунта в $APP_DIR/service_account.json"
-    echo "    2) sudo nano $APP_DIR/.env   # PANEL_ADMIN_*, GOOGLE_API_KEY, DRIVE_FOLDER_ID"
-    echo "    3) sudo chown $RUN_USER:$RUN_USER $APP_DIR/service_account.json"
-    echo "    4) sudo systemctl start $SERVICE_NAME"
+    echo "    1) sudo nano $APP_DIR/.env"
+    echo "       PANEL_ADMIN_USERNAME / PANEL_ADMIN_PASSWORD"
+    echo "       GOOGLE_API_KEY, DRIVE_FOLDER_ID"
+    echo "       GOOGLE_OAUTH_CLIENT_ID / _SECRET / _REFRESH_TOKEN  (режим oauth)"
+    echo "    2) sudo systemctl start $SERVICE_NAME"
+    echo "    (как получить OAuth-значения — см. README, раздел «Подготовка Google»)"
 else
     say "Перезапускаю сервис…"
     systemctl restart "$SERVICE_NAME"
