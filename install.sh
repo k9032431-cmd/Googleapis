@@ -57,8 +57,11 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pg_drive_sync.py" ]; then
     fi
 elif [ -d "$APP_DIR/.git" ]; then
     say "Обновляю репозиторий в $APP_DIR…"
+    # Репозиторий принадлежит RUN_USER, а git здесь запускается от root —
+    # помечаем каталог доверенным, иначе git ругается на "dubious ownership".
+    git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
     git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH"
-    git -C "$APP_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
+    git -C "$APP_DIR" reset --hard "origin/$BRANCH"
 else
     say "Клонирую репозиторий в $APP_DIR…"
     rm -rf "$APP_DIR"
