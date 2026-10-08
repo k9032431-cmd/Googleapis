@@ -42,7 +42,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pg-drive-sync")
 
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+# drive.file — доступ только к файлам, созданным самим приложением. Несенситивный
+# scope: не требует тяжёлой верификации приложения при публикации в Production.
+DRIVE_SCOPES = [os.getenv("GOOGLE_DRIVE_SCOPE")
+                or "https://www.googleapis.com/auth/drive.file"]
 API_MEDIA_BASE = "https://www.googleapis.com/drive/v3/files"
 
 
