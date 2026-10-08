@@ -79,6 +79,9 @@ class Config:
                                or "v2rayNG/1.8.5").strip()
         self.sub_client_type = (os.getenv("SUB_CLIENT_TYPE") or "").strip().strip("/")
 
+        # писать googleapis-ссылку в заметку (note) юзера в панели
+        self.panel_write_note = _get_bool("PANEL_WRITE_NOTE", False)
+
         # кого синхронизировать (пусто = всех активных)
         raw_users = (os.getenv("TARGET_USERS") or "").strip()
         self.target_users = [u.strip() for u in raw_users.split(",") if u.strip()]
@@ -220,6 +223,15 @@ class PanelClient:
         resp.raise_for_status()
         return resp.text
 
+    def set_note(self, username: str, note: str) -> None:
+        """Обновляет только поле note у пользователя (остальное не трогает)."""
+        resp = self.session.put(
+            f"{self.cfg.panel_base_url}/api/user/{quote(username)}",
+            json={"note": note},
+            timeout=30,
+        )
+        resp.raise_for_status()
+
 
 # --------------------------------------------------------------------------- #
 #  Google Drive
@@ -307,7 +319,7 @@ def sync_once(cfg: Config, drive: DriveClient) -> None:
 
     state = load_state(cfg.state_file)   # username -> {file_id, hash}
     links: dict[str, str] = {}
-    changed = created = skipped = failed = 0
+    changed = created = skipped = failed = noted = 0
     processed = 0
     total = len(users)
 
@@ -355,12 +367,27 @@ def sync_once(cfg: Config, drive: DriveClient) -> None:
             failed += 1
             continue
 
-        links[username] = media_link(state[username]["file_id"], cfg.google_api_key)
+        link = media_link(state[username]["file_id"], cfg.google_api_key)
+        links[username] = link
+
+        # По желанию: пишем ссылку в note юзера (видно в панели). Не затираем
+        # заметки, написанные вручную — меняем только пустые или те, где уже
+        # стоит наша googleapis-ссылка.
+        if cfg.panel_write_note:
+            current_note = user.get("note") or ""
+            if current_note != link and (
+                    current_note == "" or "googleapis.com/drive" in current_note):
+                try:
+                    panel.set_note(username, link)
+                    noted += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[%s] не удалось записать note: %s", username, exc)
 
     save_json(cfg.state_file, state)
     save_json(cfg.links_file, links)
-    logger.info("Готово: создано %d, обновлено %d, без изменений %d, ошибок %d. "
-                "Ссылки: %s", created, changed, skipped, failed, cfg.links_file)
+    logger.info("Готово: создано %d, обновлено %d, без изменений %d, ошибок %d, "
+                "note обновлено %d. Ссылки: %s",
+                created, changed, skipped, failed, noted, cfg.links_file)
 
 
 # --------------------------------------------------------------------------- #
