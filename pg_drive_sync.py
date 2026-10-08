@@ -1,0 +1,327 @@
+"""
+PasarGuard -> Google Drive subscription sync
+============================================
+
+Забирает подписки пользователей из панели PasarGuard (локально, по 127.0.0.1 —
+поэтому блокировка публичного домена панели не мешает), заливает их содержимое
+в файлы на Google Drive и отдаёт постоянные ссылки вида:
+
+    https://www.googleapis.com/drive/v3/files/{FILE_ID}?key={API_KEY}&alt=media
+
+File ID у файла на Drive не меняется при обновлении содержимого, поэтому ссылка
+подписки стабильна. Клиент (v2rayNG, sing-box, Clash) скачивает конфиг по
+настоящему googleapis.com — он доступен, даже если домен панели заблокирован.
+
+Запись на Drive — через service account (JSON). Чтение клиентом — по API-ключу
+(файл публикуется как «доступен всем по ссылке»).
+
+Все настройки берутся из .env (см. .env.example).
+"""
+
+import hashlib
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urljoin, quote
+
+import requests
+from dotenv import load_dotenv
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaInMemoryUpload
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+logger = logging.getLogger("pg-drive-sync")
+
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+API_MEDIA_BASE = "https://www.googleapis.com/drive/v3/files"
+
+
+# --------------------------------------------------------------------------- #
+#  Конфигурация
+# --------------------------------------------------------------------------- #
+def _get_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+class Config:
+    def __init__(self) -> None:
+        # PasarGuard
+        self.panel_base_url = (os.getenv("PANEL_BASE_URL")
+                               or "http://127.0.0.1:8000").strip().rstrip("/")
+        self.panel_admin_username = (os.getenv("PANEL_ADMIN_USERNAME") or "").strip()
+        self.panel_admin_password = os.getenv("PANEL_ADMIN_PASSWORD") or ""
+        self.verify_tls = _get_bool("PANEL_VERIFY_TLS", True)
+
+        # какой формат подписки забирать
+        self.sub_user_agent = (os.getenv("SUB_USER_AGENT")
+                               or "v2rayNG/1.8.5").strip()
+        self.sub_client_type = (os.getenv("SUB_CLIENT_TYPE") or "").strip().strip("/")
+
+        # кого синхронизировать (пусто = всех активных)
+        raw_users = (os.getenv("TARGET_USERS") or "").strip()
+        self.target_users = [u.strip() for u in raw_users.split(",") if u.strip()]
+        self.only_active = _get_bool("ONLY_ACTIVE_USERS", True)
+
+        # Google Drive
+        self.sa_file = (os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "").strip()
+        self.google_api_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+        self.drive_folder_id = (os.getenv("DRIVE_FOLDER_ID") or "").strip()
+        self.file_name_template = (os.getenv("FILE_NAME_TEMPLATE")
+                                   or "{username}.txt").strip()
+
+        # состояние и вывод
+        state_dir = os.getenv("STATE_DIR") or "/var/lib/pasarguard-drive-sync"
+        self.state_file = Path(os.getenv("STATE_FILE") or f"{state_dir}/state.json")
+        self.links_file = Path(os.getenv("LINKS_FILE") or f"{state_dir}/links.json")
+
+        # периодичность
+        self.sync_interval = int(os.getenv("SYNC_INTERVAL") or "0")
+
+    def validate(self) -> list[str]:
+        errors = []
+        if not self.panel_admin_username:
+            errors.append("PANEL_ADMIN_USERNAME не задан.")
+        if not self.panel_admin_password:
+            errors.append("PANEL_ADMIN_PASSWORD не задан.")
+        if not self.sa_file:
+            errors.append("GOOGLE_SERVICE_ACCOUNT_FILE не задан.")
+        elif not Path(self.sa_file).is_file():
+            errors.append(f"Файл service account не найден: {self.sa_file}")
+        if not self.google_api_key:
+            errors.append("GOOGLE_API_KEY не задан (нужен для ссылки чтения).")
+        if not self.drive_folder_id:
+            errors.append("DRIVE_FOLDER_ID не задан (папка/Shared Drive для файлов).")
+        return errors
+
+
+# --------------------------------------------------------------------------- #
+#  PasarGuard API
+# --------------------------------------------------------------------------- #
+class PanelClient:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.session = requests.Session()
+        self.session.verify = cfg.verify_tls
+        self.token: str | None = None
+
+    def login(self) -> None:
+        url = f"{self.cfg.panel_base_url}/api/admin/token"
+        resp = self.session.post(
+            url,
+            data={
+                "username": self.cfg.panel_admin_username,
+                "password": self.cfg.panel_admin_password,
+                "grant_type": "password",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        self.token = resp.json()["access_token"]
+        self.session.headers["Authorization"] = f"Bearer {self.token}"
+        logger.info("Авторизовались в панели как %s", self.cfg.panel_admin_username)
+
+    def list_users(self) -> list[dict]:
+        """Возвращает список пользователей (с пагинацией)."""
+        users: list[dict] = []
+        offset, limit = 0, 100
+        while True:
+            resp = self.session.get(
+                f"{self.cfg.panel_base_url}/api/users",
+                params={"offset": offset, "limit": limit},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            batch = data.get("users", data if isinstance(data, list) else [])
+            users.extend(batch)
+            total = data.get("total") if isinstance(data, dict) else None
+            offset += limit
+            if not batch or (total is not None and offset >= total):
+                break
+        return users
+
+    def subscription_content(self, user: dict) -> str:
+        """Скачивает содержимое подписки пользователя (как это видит клиент)."""
+        sub_url = user.get("subscription_url") or ""
+        if not sub_url:
+            raise ValueError("у пользователя нет subscription_url")
+        # subscription_url обычно относительный (/sub/<token>) — приклеиваем к base.
+        full = sub_url if sub_url.startswith("http") else urljoin(
+            self.cfg.panel_base_url + "/", sub_url.lstrip("/"))
+        if self.cfg.sub_client_type:
+            full = full.rstrip("/") + "/" + self.cfg.sub_client_type
+        resp = self.session.get(
+            full,
+            headers={"User-Agent": self.cfg.sub_user_agent},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.text
+
+
+# --------------------------------------------------------------------------- #
+#  Google Drive
+# --------------------------------------------------------------------------- #
+class DriveClient:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        creds = service_account.Credentials.from_service_account_file(
+            cfg.sa_file, scopes=DRIVE_SCOPES)
+        self.service = build("drive", "v3", credentials=creds,
+                             cache_discovery=False)
+
+    def _ensure_public(self, file_id: str) -> None:
+        try:
+            self.service.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+                supportsAllDrives=True,
+            ).execute()
+        except HttpError as exc:
+            # 'anyone' уже выдан — ок; остальное пробрасываем.
+            if exc.resp.status not in (400, 409):
+                raise
+
+    def upload(self, file_id: str | None, name: str, content: str) -> str:
+        media = MediaInMemoryUpload(content.encode("utf-8"),
+                                    mimetype="text/plain", resumable=False)
+        if file_id:
+            # Обновляем существующий файл — ID (и ссылка) сохраняются.
+            self.service.files().update(
+                fileId=file_id, media_body=media, supportsAllDrives=True,
+            ).execute()
+            return file_id
+        created = self.service.files().create(
+            body={"name": name, "parents": [self.cfg.drive_folder_id]},
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True,
+        ).execute()
+        file_id = created["id"]
+        self._ensure_public(file_id)
+        return file_id
+
+
+# --------------------------------------------------------------------------- #
+#  Состояние
+# --------------------------------------------------------------------------- #
+def load_state(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text("utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(path)
+
+
+def media_link(file_id: str, api_key: str) -> str:
+    return f"{API_MEDIA_BASE}/{quote(file_id)}?key={quote(api_key)}&alt=media"
+
+
+# --------------------------------------------------------------------------- #
+#  Один проход синхронизации
+# --------------------------------------------------------------------------- #
+def sync_once(cfg: Config, drive: DriveClient) -> None:
+    panel = PanelClient(cfg)
+    panel.login()
+    users = panel.list_users()
+    logger.info("Пользователей в панели: %d", len(users))
+
+    state = load_state(cfg.state_file)   # username -> {file_id, hash}
+    links: dict[str, str] = {}
+    changed = created = skipped = failed = 0
+
+    for user in users:
+        username = user.get("username")
+        if not username:
+            continue
+        if cfg.target_users and username not in cfg.target_users:
+            continue
+        if cfg.only_active and user.get("status") not in (None, "active", "on_hold"):
+            continue
+
+        try:
+            content = panel.subscription_content(user)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] не удалось получить подписку: %s", username, exc)
+            failed += 1
+            continue
+
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        entry = state.get(username, {})
+        file_id = entry.get("file_id")
+
+        try:
+            if file_id and entry.get("hash") == digest:
+                skipped += 1
+            else:
+                name = cfg.file_name_template.format(username=username)
+                new_id = drive.upload(file_id, name, content)
+                if file_id:
+                    changed += 1
+                else:
+                    created += 1
+                    file_id = new_id
+                state[username] = {"file_id": file_id, "hash": digest}
+        except HttpError as exc:
+            logger.warning("[%s] ошибка Drive: %s", username, exc)
+            failed += 1
+            continue
+
+        links[username] = media_link(state[username]["file_id"], cfg.google_api_key)
+
+    save_json(cfg.state_file, state)
+    save_json(cfg.links_file, links)
+    logger.info("Готово: создано %d, обновлено %d, без изменений %d, ошибок %d. "
+                "Ссылки: %s", created, changed, skipped, failed, cfg.links_file)
+
+
+# --------------------------------------------------------------------------- #
+#  Точка входа
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    load_dotenv()
+    cfg = Config()
+    errors = cfg.validate()
+    if errors:
+        for e in errors:
+            logger.error(e)
+        logger.error("Исправь .env и перезапусти.")
+        sys.exit(1)
+
+    drive = DriveClient(cfg)
+
+    if cfg.sync_interval > 0:
+        logger.info("Режим цикла: синхронизация каждые %d сек.", cfg.sync_interval)
+        while True:
+            try:
+                sync_once(cfg, drive)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Ошибка прохода синхронизации: %s", exc)
+            time.sleep(cfg.sync_interval)
+    else:
+        sync_once(cfg, drive)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
