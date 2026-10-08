@@ -1,0 +1,13 @@
+# секреты
+.env
+
+# python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# прочее
+*.log
+.DS_Store
