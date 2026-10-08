@@ -82,6 +82,10 @@ class Config:
         # писать googleapis-ссылку в заметку (note) юзера в панели
         self.panel_write_note = _get_bool("PANEL_WRITE_NOTE", False)
 
+        # название подписки (добавляется в ссылку как #title; многие клиенты
+        # показывают его как имя подписки). Пусто = не добавлять.
+        self.sub_title = (os.getenv("SUB_TITLE") or "").strip()
+
         # кого синхронизировать (пусто = всех активных)
         raw_users = (os.getenv("TARGET_USERS") or "").strip()
         self.target_users = [u.strip() for u in raw_users.split(",") if u.strip()]
@@ -304,8 +308,13 @@ def save_json(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def media_link(file_id: str, api_key: str) -> str:
-    return f"{API_MEDIA_BASE}/{quote(file_id)}?key={quote(api_key)}&alt=media"
+def media_link(file_id: str, api_key: str, title: str = "") -> str:
+    url = f"{API_MEDIA_BASE}/{quote(file_id)}?key={quote(api_key)}&alt=media"
+    if title:
+        # Фрагмент после # на сервер не уходит (Google отдаёт файл как есть),
+        # но многие клиенты используют его как название подписки.
+        url += "#" + quote(title)
+    return url
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +376,8 @@ def sync_once(cfg: Config, drive: DriveClient) -> None:
             failed += 1
             continue
 
-        link = media_link(state[username]["file_id"], cfg.google_api_key)
+        link = media_link(state[username]["file_id"], cfg.google_api_key,
+                          cfg.sub_title)
         links[username] = link
 
         # По желанию: пишем ссылку в note юзера (видно в панели). Не затираем
