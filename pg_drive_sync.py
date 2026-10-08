@@ -246,12 +246,24 @@ class DriveClient:
                 fileId=file_id, media_body=media, supportsAllDrives=True,
             ).execute()
             return file_id
-        created = self.service.files().create(
-            body={"name": name, "parents": [self.cfg.drive_folder_id]},
-            media_body=media,
-            fields="id",
-            supportsAllDrives=True,
-        ).execute()
+        body = {"name": name}
+        if self.cfg.drive_folder_id:
+            body["parents"] = [self.cfg.drive_folder_id]
+        try:
+            created = self.service.files().create(
+                body=body, media_body=media, fields="id", supportsAllDrives=True,
+            ).execute()
+        except HttpError as exc:
+            # В режиме drive.file папка-родитель может быть недоступна приложению
+            # (404 на parent) — создаём файл в корне My Drive вместо падения.
+            if exc.resp.status == 404 and "parents" in body:
+                logger.warning("Папка %s недоступна, создаю файл в корне Drive",
+                               self.cfg.drive_folder_id)
+                created = self.service.files().create(
+                    body={"name": name}, media_body=media, fields="id",
+                ).execute()
+            else:
+                raise
         file_id = created["id"]
         self._ensure_public(file_id)
         return file_id
