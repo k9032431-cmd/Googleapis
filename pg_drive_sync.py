@@ -22,10 +22,16 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import sys
 import time
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, quote
+
+# httplib2 (внутри google-api-client) не имеет таймаута по умолчанию: одно
+# подвисшее соединение к Google вешает весь процесс навсегда. Ставим глобальный
+# таймаут сокета, чтобы такой запрос падал с ошибкой, а не висел.
+socket.setdefaulttimeout(60)
 
 import requests
 from dotenv import load_dotenv
@@ -302,6 +308,8 @@ def sync_once(cfg: Config, drive: DriveClient) -> None:
     state = load_state(cfg.state_file)   # username -> {file_id, hash}
     links: dict[str, str] = {}
     changed = created = skipped = failed = 0
+    processed = 0
+    total = len(users)
 
     for user in users:
         username = user.get("username")
@@ -311,6 +319,13 @@ def sync_once(cfg: Config, drive: DriveClient) -> None:
             continue
         if cfg.only_active and user.get("status") not in (None, "active", "on_hold"):
             continue
+
+        processed += 1
+        if processed % 20 == 0:
+            logger.info("…обработано %d/%d (создано %d, ошибок %d), сохраняю прогресс",
+                        processed, total, created, failed)
+            save_json(cfg.state_file, state)
+            save_json(cfg.links_file, links)
 
         try:
             content = panel.subscription_content(user)
@@ -335,7 +350,7 @@ def sync_once(cfg: Config, drive: DriveClient) -> None:
                     created += 1
                     file_id = new_id
                 state[username] = {"file_id": file_id, "hash": digest}
-        except HttpError as exc:
+        except Exception as exc:  # noqa: BLE001  (HttpError, таймаут сокета и пр.)
             logger.warning("[%s] ошибка Drive: %s", username, exc)
             failed += 1
             continue
