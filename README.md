@@ -147,5 +147,13 @@ sudo -u pgdrive SYNC_INTERVAL=0 ./venv/bin/python pg_drive_sync.py
 
 В комплекте есть помощник: бот, которому кидаешь **ID файла Drive или ссылку**,
 а он отдаёт готовую `googleapis`-ссылку. Это ручной инструмент, для работы
-синхронизации он не нужен. Как пользоваться — см. комментарии в `bot.py` и
-переменные `BOT_TOKEN` / `ALLOWED_USERS` в `.env`.
+синхронизации он не нужен и по умолчанию **не устанавливается**.
+
+Если нужен — поставь его зависимости отдельно и заполни `BOT_TOKEN`:
+
+```bash
+/opt/googleapis-bot/venv/bin/pip install -r /opt/googleapis-bot/requirements-bot.txt
+```
+
+Как пользоваться — см. комментарии в `bot.py` и переменные
+`BOT_TOKEN` / `ALLOWED_USERS` в `.env`.

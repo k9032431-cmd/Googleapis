@@ -1,0 +1,5 @@
+# Зависимости НЕОБЯЗАТЕЛЬНОГО телеграм-бота bot.py.
+# Ставить отдельно и только если нужен бот:
+#   /opt/googleapis-bot/venv/bin/pip install -r requirements-bot.txt
+# aiohttp не фиксируем — его подтянет aiogram в совместимой версии.
+aiogram==3.15.0
